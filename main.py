@@ -254,7 +254,7 @@ def acil_kod_kapat(req: KodKapatRequest):
             kabul_zaman = ?,    
             kabul_eden_kullanici_id = ?
         WHERE id = ?
-    """, (tr_zaman, req.kabul_personel, req.log_id))  -- tr_zaman değişkenini buraya ekledik
+    """, (tr_zaman, req.kabul_personel, req.log_id))  
     
     conn.commit()
     conn.close()
