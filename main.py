@@ -154,22 +154,27 @@ def delete_location(location_id: int):
 @app.post("/api/kod-tetikle")
 @app.post("/api/kod-ver")
 def acil_kod_ver(req: KodTetikleRequest):
+    # 1. Türkiye saatini alıyoruz
+    tr_zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = get_db()
     cursor = conn.cursor()
-    
+     
     # Konum metni üzerinden location_id bulma veya varsayılan ilk konumu atama
     cursor.execute("SELECT id FROM locations LIMIT 1")
     first_loc = cursor.fetchone()
     loc_id = first_loc["id"] if first_loc else 1
 
+    # baslangic_zaman alanına tr_zaman değerini ekledik
     cursor.execute('''
-        INSERT INTO emergency_logs (kod_renk, location_id, veren_kullanici_id, durum)
-        VALUES (?, ?, 1, 'AKTIF')
-    ''', (req.kod_renk, loc_id))
+        INSERT INTO emergency_logs (kod_renk, location_id, veren_kullanici_id, baslangic_zaman, durum)
+        VALUES (?, ?, 1, ?, 'AKTIF')
+    ''', (req.kod_renk, loc_id, tr_zaman))
+    
     log_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    
+     
     return {"status": "success", "log_id": log_id, "message": f"{req.kod_renk} KOD çağrısı kaydedildi."}
 
 @app.post("/api/register-device")
