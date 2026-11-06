@@ -1,8 +1,8 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import sqlite3
 import csv
 import io
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, Response
@@ -27,29 +27,30 @@ def init_db():
     
     # Aktif Cihaz Kayıtları Tablosu
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS active_devices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        device_id TEXT UNIQUE,
-        role TEXT,
-        fcm_token TEXT,
-        last_seen TIMESTAMP       
-    )
-''')
+        CREATE TABLE IF NOT EXISTS active_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT UNIQUE,
+            role TEXT,
+            fcm_token TEXT,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     
     # Acil Kod Logları Tablosu
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS emergency_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        kod_renk TEXT NOT NULL,
-        location_id INTEGER,
-        veren_kullanici_id INTEGER,
-        kabul_eden_kullanici_id TEXT,
-        baslangic_zaman DATETIME,       
-        kabul_zaman DATETIME,
-        durum TEXT DEFAULT 'AKTIF',
-        FOREIGN KEY(location_id) REFERENCES locations(id)
-    )
-''')
+        CREATE TABLE IF NOT EXISTS emergency_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kod_renk TEXT NOT NULL,
+            location_id INTEGER,
+            veren_kullanici_id INTEGER,
+            veren_kullanici TEXT,
+            kabul_eden_kullanici_id TEXT,
+            baslangic_zaman DATETIME DEFAULT CURRENT_TIMESTAMP,
+            kabul_zaman DATETIME,
+            durum TEXT DEFAULT 'AKTIF',
+            FOREIGN KEY(location_id) REFERENCES locations(id)
+        )
+    ''')
     
     # Varsayılan Konum Yoksa Ekle
     cursor.execute("SELECT COUNT(*) FROM locations")
@@ -98,7 +99,8 @@ class LocationCreate(BaseModel):
 
 class KodTetikleRequest(BaseModel):
     kod_renk: str
-    konum: str  # Flutter tarafından gönderilen birleşik konum metni veya ID
+    konum: str  # Flutter tarafından gönderilen birleşik konum metni
+    veren_kullanici: str = "Bilinmeyen Personel"  # Flutter'dan gelen personel adı
 
 class DeviceRegister(BaseModel):
     device_id: str
@@ -110,6 +112,10 @@ class KodKapatRequest(BaseModel):
     kabul_personel: str
 
 # 4. REST API UÇ NOKTALARI
+
+@app.get("/")
+def read_root():
+    return {"status": "online", "message": "Acil Kod Sistemi API Aktif Çalışıyor"}
 
 # Hem /api/locations hem /api/konumlar destekleniyor
 @app.get("/api/locations")
@@ -150,48 +156,42 @@ def delete_location(location_id: int):
     conn.close()
     return {"status": "success", "message": "Konum silindi."}
 
-# Flutter Mobil / Web'den Gelen Kod Çağrıları İçin Tek Uç Nokta
+# Flutter Mobil / Web'den Gelen Kod Çağrıları İçin Uç Noktalar
+@app.post("/api/kod-gonder")
 @app.post("/api/kod-tetikle")
 @app.post("/api/kod-ver")
 def acil_kod_ver(req: KodTetikleRequest):
-    # 1. Türkiye saatini alıyoruz
-    tr_zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
-    
     conn = get_db()
     cursor = conn.cursor()
-     
-    # Konum metni üzerinden location_id bulma veya varsayılan ilk konumu atama
+    
+    # Konum metnine göre eşleşen konumu bulmaya çalışalım, yoksa ilkini alalım
     cursor.execute("SELECT id FROM locations LIMIT 1")
     first_loc = cursor.fetchone()
     loc_id = first_loc["id"] if first_loc else 1
 
-    # baslangic_zaman alanına tr_zaman değerini ekledik
     cursor.execute('''
-        INSERT INTO emergency_logs (kod_renk, location_id, veren_kullanici_id, baslangic_zaman, durum)
-        VALUES (?, ?, 1, ?, 'AKTIF')
-    ''', (req.kod_renk, loc_id, tr_zaman))
+        INSERT INTO emergency_logs (kod_renk, location_id, veren_kullanici, durum)
+        VALUES (?, ?, ?, 'AKTIF')
+    ''', (req.kod_renk, loc_id, req.veren_kullanici))
     
     log_id = cursor.lastrowid
     conn.commit()
     conn.close()
-     
+    
     return {"status": "success", "log_id": log_id, "message": f"{req.kod_renk} KOD çağrısı kaydedildi."}
 
 @app.post("/api/register-device")
 def register_device(device: DeviceRegister):
-    # Anlık Türkiye saatini üretiyoruz
-    tr_zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
-    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO active_devices (device_id, role, fcm_token, last_seen)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(device_id) DO UPDATE SET
             role = excluded.role,
             fcm_token = excluded.fcm_token,
-            last_seen = ?
-    """, (device.device_id, device.role, device.fcm_token, tr_zaman, tr_zaman))
+            last_seen = CURRENT_TIMESTAMP
+    """, (device.device_id, device.role, device.fcm_token))
     conn.commit()
     conn.close()
     return {"status": "success", "message": f"Cihaz {device.role} olarak kaydedildi."}
@@ -250,7 +250,6 @@ def get_aktif_kod():
 
 @app.post("/api/kod-kapat")
 def acil_kod_kapat(req: KodKapatRequest):
-    # 1. Adım: Türkiye saatini string olarak üretiyoruz
     tr_zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
     
     conn = get_db()
@@ -258,20 +257,16 @@ def acil_kod_kapat(req: KodKapatRequest):
     cursor.execute("""
         UPDATE emergency_logs 
         SET durum = 'TAMAMLANDI', 
-            kabul_zaman = ?,    
+            kabul_zaman = ?, 
             kabul_eden_kullanici_id = ?
         WHERE id = ?
-    """, (tr_zaman, req.kabul_personel, req.log_id))  
-    
+    """, (tr_zaman, req.kabul_personel, req.log_id))
     conn.commit()
     conn.close()
     return {"status": "success", "message": f"Acil kod çağrısı {req.kabul_personel} tarafından kapatıldı."}
 
 @app.get("/api/admin/logs")
 def get_all_logs():
-    # Anlık Türkiye saatini string olarak alıyoruz
-    suan_tr = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
-    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
@@ -283,12 +278,11 @@ def get_all_logs():
             e.kabul_zaman,
             e.durum,
             COALESCE(e.kabul_eden_kullanici_id, '-') as kabul_eden,
-            ROUND((strftime('%s', COALESCE(e.kabul_zaman, ?)) - strftime('%s', e.baslangic_zaman))) as gecen_saniye
+            ROUND((strftime('%s', COALESCE(e.kabul_zaman, CURRENT_TIMESTAMP)) - strftime('%s', e.baslangic_zaman))) as gecen_saniye
         FROM emergency_logs e
         LEFT JOIN locations l ON e.location_id = l.id
         ORDER BY e.id DESC LIMIT 50
-    """, (suan_tr,))  
-    
+    """)
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -296,9 +290,6 @@ def get_all_logs():
 # SKS UYUMLU CSV EXPORT ENDPOINT'İ
 @app.get("/api/admin/export-csv")
 def export_sks_csv():
-    # Anlık Türkiye saatini string olarak alıyoruz
-    suan_tr = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
-    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
@@ -309,17 +300,14 @@ def export_sks_csv():
             e.baslangic_zaman as 'Çağrı Zamanı',
             COALESCE(e.kabul_zaman, '-') as 'Müdahale Zamanı',
             COALESCE(e.kabul_eden_kullanici_id, '-') as 'Müdahale Eden Personel',
-            ROUND((strftime('%s', COALESCE(e.kabul_zaman, ?)) - strftime('%s', e.baslangic_zaman))) as 'Müdahale Süresi (Saniye)',
+            ROUND((strftime('%s', COALESCE(e.kabul_zaman, CURRENT_TIMESTAMP)) - strftime('%s', e.baslangic_zaman))) as 'Müdahale Süresi (Saniye)',
             e.durum as 'Durum'
         FROM emergency_logs e
         LEFT JOIN locations l ON e.location_id = l.id
         ORDER BY e.id DESC
-    """, (suan_tr,))  
-    
+    """)
     rows = cursor.fetchall()
     conn.close()
-    
-    # (Devamındaki CSV oluşturma kodların buraya gelecek...)
 
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
